@@ -3360,7 +3360,7 @@ static int32_t prompt_get_n_before_user(
             result = (int32_t) tokenize_input_prompts(vocab, nullptr, prefix, true, true)[0].size();
         }
 
-        SRV_TRC("message_spans: last user message: byte_pos=%d, media=%zu, n_before_user=%d\n",
+        SRV_DBG("message_spans: last user message: byte_pos=%d, media=%zu, n_before_user=%d\n",
                 byte_pos, n_prefix_media, result);
     }
 

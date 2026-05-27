@@ -1,0 +1,29 @@
+services:
+  llama-server:
+    restart: unless-stopped
+    build: .
+    ports:
+      - "8881:8080"
+    volumes:
+      - .:/workspace:ro  # Mounts the workspace to access scripts and models
+      - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
+      - /mnt/S/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - LLAMA_SERVER=/usr/local/bin/llama-server
+      - VERIFY_ASSISTANT_GGUF=0  # Disables python validation script in container
+      - MAIN_GGUF=/root/.cache/huggingface/hub/models--ggml-org--gemma-4-31B-it-GGUF/snapshots/fb5801c702a472691c6eba168f28af79a076fbe9/gemma-4-31B-it-Q4_K_M.gguf
+      - DRAFT_GGUF=/root/.cache/huggingface/hub/models--AtomicChat--gemma-4-31B-it-assistant-GGUF/snapshots/c2357e3ea670ef03c5f1a984e7fc37cdb5dc45c4/gemma-4-31B-it-assistant.Q4_K_M.gguf
+      - HOST=0.0.0.0
+      - PORT=8080
+      # You can easily override script defaults here:
+      - CTX=163840
+      # - NGL=99
+      # - SPEC=mtp
+    entrypoint: ["/bin/bash", "/workspace/scripts/run-gemma4-31b-mtp-server.sh"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

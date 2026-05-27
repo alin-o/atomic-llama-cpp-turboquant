@@ -730,7 +730,10 @@ private:
                     auto params_dft = params_base;
                     params_dft.n_parallel   = 1;
                     params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
-                    params_dft.n_batch      = llama_n_ctx_seq(ctx);
+                    // Cap draft n_batch to target's configured n_batch. Without this, kv_unified=true
+                    // makes llama_n_ctx_seq(ctx) the full n_ctx, which would sink ~n_ctx-sized compute
+                    // pp buffers into every per-slot draft context and OOM under np>1.
+                    params_dft.n_batch      = std::min<uint32_t>(params_base.n_batch, llama_n_ctx_seq(ctx));
                     params_dft.cache_type_k = params_spec.cache_type_k;
                     params_dft.cache_type_v = params_spec.cache_type_v;
                     if (params_spec.cpuparams.n_threads > 0) {
@@ -757,7 +760,10 @@ private:
                     auto params_dft = params_base;
                     params_dft.n_parallel   = 1;
                     params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
-                    params_dft.n_batch      = llama_n_ctx_seq(ctx);
+                    // Cap draft n_batch to target's configured n_batch. Without this, kv_unified=true
+                    // makes llama_n_ctx_seq(ctx) the full n_ctx, which would sink ~n_ctx-sized compute
+                    // pp buffers into every per-slot draft context and OOM under np>1.
+                    params_dft.n_batch      = std::min<uint32_t>(params_base.n_batch, llama_n_ctx_seq(ctx));
                     params_dft.devices      = params_spec.devices;
                     params_dft.model        = params_spec.mparams_dft;
                     params_dft.n_gpu_layers = params_spec.n_gpu_layers;
@@ -787,7 +793,8 @@ private:
 
                 params_dft.n_parallel   = 1;
                 params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
-                params_dft.n_batch      = llama_n_ctx_seq(ctx);
+                // Cap draft n_batch to target's configured n_batch (see comment above re: kv_unified OOM).
+                params_dft.n_batch      = std::min<uint32_t>(params_base.n_batch, llama_n_ctx_seq(ctx));
                 params_dft.devices      = params_spec.devices;
                 params_dft.model        = params_spec.mparams_dft;
                 params_dft.n_gpu_layers = params_spec.n_gpu_layers;
@@ -2680,17 +2687,16 @@ private:
                                 || llama_model_is_hybrid(model));
                     }
 
-                    // Qwen NextN draft prime needs pre-norm rows for the WHOLE prompt to
-                    // be present in the target's embd_pre_norm buffer when begin() runs.
-                    // The checkpoint-split logic decodes the last few prompt tokens in a
-                    // separate batch, which would overwrite output_ids of the earlier
-                    // tokens and lose their pre-norm rows. Disable the split for NextN
-                    // slots — the speculative rollback already keeps draft KV consistent
-                    // via llama_context_nextn_seq_rm. Gemma 4 MTP path is unaffected.
-                    if (slot.spec != nullptr &&
-                            slot.task->params.speculative.type == COMMON_SPECULATIVE_TYPE_NEXTN) {
-                        do_checkpoint = false;
-                    }
+                    // Qwen NextN: the END-OF-PROMPT checkpoint-split (lines below, ~2780)
+                    // decodes the last few prompt tokens in a separate small batch, which
+                    // would overwrite output_ids of earlier tokens in embd_pre_norm and break
+                    // NextN prime. We guard *that* split below with `nextn_active` rather
+                    // than blanket-disabling all checkpoints — mid-prompt checkpoints happen
+                    // at natural n_batch boundaries (no extra split is introduced) and are
+                    // needed for SWA/hybrid cache reuse across requests (PR #13194).
+                    const bool nextn_active =
+                            slot.spec != nullptr &&
+                            slot.task->params.speculative.type == COMMON_SPECULATIVE_TYPE_NEXTN;
 
                     bool has_mtmd = false;
 
@@ -2769,7 +2775,12 @@ private:
                         //  - 4 + n_ubatch
                         //  - 4
                         // ref: https://github.com/ggml-org/llama.cpp/pull/20288
-                        if (do_checkpoint) {
+                        // End-of-prompt split: break the batch a few tokens before the prompt
+                        // end so a checkpoint is created BEFORE those last tokens. For NextN this
+                        // would corrupt embd_pre_norm and break draft prime, so skip this split
+                        // for NextN slots — mid-prompt checkpoints at natural n_batch boundaries
+                        // are unaffected and still give SWA cache reuse on the next request.
+                        if (do_checkpoint && !nextn_active) {
                             static const int checkpoint_offsets[] = {4 + n_ubatch, 4};
 
                             bool should_break = false;
@@ -2806,8 +2817,14 @@ private:
                         slot.init_sampler();
                         SLT_INF(slot, "prompt processing done, n_tokens = %d, batch.n_tokens = %d\n", slot.prompt.n_tokens(), batch.n_tokens);
                     } else {
-                        // skip ordinary mid-prompt checkpoints
-                        if (!n_before_user_known && !near_prompt_end) {
+                        // Upstream (PR #22929) skips mid-prompt checkpoints when n_before_user is
+                        // unknown, assuming every request comes through OAI chat completion with
+                        // auto-detected delimiters that populate message_spans. For raw /completion
+                        // requests, or chat templates the autoparser can't crack, n_before_user
+                        // stays -1 and that path leaves zero checkpoints — re-triggering PR #13194's
+                        // SWA "forcing full prompt re-processing" bug. Invert the gate: only skip
+                        // mid-prompt checkpoints when we DO have the better anchor.
+                        if (n_before_user_known && !near_prompt_end) {
                             do_checkpoint = false;
                         }
 

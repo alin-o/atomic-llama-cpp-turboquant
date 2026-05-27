@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -176,9 +177,11 @@ struct llama_context {
             const float * h_prev,
             int32_t       n_steps);
 
-    // Block until the in-flight MTP request completes. Copies drafts into out_drafts
-    // and the last hidden state into out_h_prev_last (optional). Returns 0 on success.
+    // Block until the in-flight MTP request for seq_id completes. Copies drafts into
+    // out_drafts and the last hidden state into out_h_prev_last (optional). Returns 0
+    // on success. Concurrent waiters on different seq_ids are independent.
     int32_t decode_mtp_wait(
+            llama_seq_id  seq_id,
             llama_token * out_drafts,
             float       * out_h_prev_last);
 
@@ -440,9 +443,12 @@ private:
     std::mutex              mtp_mu;
     std::condition_variable mtp_cv_request;
     std::condition_variable mtp_cv_response;
-    std::optional<mtp_request>  mtp_pending;   // submitted, not yet picked up by worker
-    bool                        mtp_in_flight = false; // worker is processing
-    std::optional<mtp_response> mtp_completed; // worker finished, awaiting _wait
+    // Per-seq queues so np>1 (multiple slots on distinct seq_ids) can each have a draft
+    // in flight without colliding. The worker still processes them serially on a single
+    // sched_mtp; concurrency is at the submit/wait surface, not on the GPU.
+    std::map<llama_seq_id, mtp_request>  mtp_pending;   // submitted, not yet picked up
+    std::set<llama_seq_id>               mtp_in_flight; // worker processing
+    std::map<llama_seq_id, mtp_response> mtp_completed; // worker finished, awaiting _wait
 
     // Serializes shared-backend reconfiguration (set_threadpool_fn, set_n_threads_fns)
     // between the main thread (graph_compute) and the MTP worker (graph_compute_mtp).

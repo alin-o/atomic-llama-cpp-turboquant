@@ -2544,7 +2544,7 @@ int32_t llama_context::decode_mtp(
     if (rc != 0) {
         return rc;
     }
-    return decode_mtp_wait(out_drafts, h_prev);
+    return decode_mtp_wait(seq_id, out_drafts, h_prev);
 }
 
 int32_t llama_context::decode_mtp_sync(
@@ -2694,12 +2694,16 @@ int32_t llama_context::decode_mtp_async(
 
     {
         std::unique_lock<std::mutex> lk(mtp_mu);
-        if (mtp_pending.has_value() || mtp_in_flight || mtp_completed.has_value()) {
-            LLAMA_LOG_ERROR("%s: previous MTP request not yet waited (pending=%d in_flight=%d completed=%d)\n",
-                    __func__,
-                    (int) mtp_pending.has_value(),
-                    (int) mtp_in_flight,
-                    (int) mtp_completed.has_value());
+        const bool collision =
+                mtp_pending.count(seq_id) > 0 ||
+                mtp_in_flight.count(seq_id) > 0 ||
+                mtp_completed.count(seq_id) > 0;
+        if (collision) {
+            LLAMA_LOG_ERROR("%s: previous MTP request for seq_id=%d not yet waited (pending=%d in_flight=%d completed=%d)\n",
+                    __func__, (int) seq_id,
+                    (int) (mtp_pending.count(seq_id) > 0),
+                    (int) (mtp_in_flight.count(seq_id) > 0),
+                    (int) (mtp_completed.count(seq_id) > 0));
             return -7;
         }
         mtp_request req;
@@ -2708,25 +2712,30 @@ int32_t llama_context::decode_mtp_async(
         req.last_token = last_token;
         req.n_steps    = n_steps;
         req.h_prev.assign(h_prev, h_prev + n_bb);
-        mtp_pending = std::move(req);
+        mtp_pending.emplace(seq_id, std::move(req));
     }
     mtp_cv_request.notify_one();
     return 0;
 }
 
 int32_t llama_context::decode_mtp_wait(
+        llama_seq_id  seq_id,
         llama_token * out_drafts,
         float       * out_h_prev_last) {
     std::unique_lock<std::mutex> lk(mtp_mu);
-    mtp_cv_response.wait(lk, [this] {
-        return mtp_completed.has_value() || (!mtp_in_flight && !mtp_pending.has_value());
+    mtp_cv_response.wait(lk, [this, seq_id] {
+        // Wake when either our result is ready, or the seq has no in-flight work
+        // (defensive: a wait without a prior submit should fail fast rather than hang).
+        return mtp_completed.count(seq_id) > 0 ||
+               (mtp_in_flight.count(seq_id) == 0 && mtp_pending.count(seq_id) == 0);
     });
-    if (!mtp_completed.has_value()) {
-        LLAMA_LOG_ERROR("%s: no in-flight MTP request to wait on\n", __func__);
+    auto it = mtp_completed.find(seq_id);
+    if (it == mtp_completed.end()) {
+        LLAMA_LOG_ERROR("%s: no in-flight MTP request to wait on for seq_id=%d\n", __func__, (int) seq_id);
         return -7;
     }
-    mtp_response resp = std::move(*mtp_completed);
-    mtp_completed.reset();
+    mtp_response resp = std::move(it->second);
+    mtp_completed.erase(it);
     lk.unlock();
 
     if (resp.status != 0) {
@@ -2830,17 +2839,23 @@ int32_t llama_context::decode_mtp_run(const mtp_request & req, mtp_response & re
 void llama_context::mtp_worker_loop() {
     for (;;) {
         mtp_request req;
+        llama_seq_id seq_id = 0;
         {
             std::unique_lock<std::mutex> lk(mtp_mu);
             mtp_cv_request.wait(lk, [this] {
-                return mtp_worker_stop.load(std::memory_order_acquire) || mtp_pending.has_value();
+                return mtp_worker_stop.load(std::memory_order_acquire) || !mtp_pending.empty();
             });
-            if (mtp_worker_stop.load(std::memory_order_acquire) && !mtp_pending.has_value()) {
+            if (mtp_worker_stop.load(std::memory_order_acquire) && mtp_pending.empty()) {
                 return;
             }
-            req = std::move(*mtp_pending);
-            mtp_pending.reset();
-            mtp_in_flight = true;
+            // Pick the lowest seq_id with a pending request (std::map iteration is ordered).
+            // The choice is arbitrary as long as it's deterministic; serial processing
+            // keeps sched_mtp / gf_res_prev_mtp single-threaded.
+            auto it = mtp_pending.begin();
+            seq_id  = it->first;
+            req     = std::move(it->second);
+            mtp_pending.erase(it);
+            mtp_in_flight.insert(seq_id);
         }
 
         mtp_response resp;
@@ -2848,10 +2863,12 @@ void llama_context::mtp_worker_loop() {
 
         {
             std::lock_guard<std::mutex> lk(mtp_mu);
-            mtp_in_flight = false;
-            mtp_completed = std::move(resp);
+            mtp_in_flight.erase(seq_id);
+            mtp_completed.emplace(seq_id, std::move(resp));
         }
-        mtp_cv_response.notify_one();
+        // notify_all (not notify_one): multiple slots may be parked on cv_response
+        // each waiting for its own seq_id; only the matching predicate fires.
+        mtp_cv_response.notify_all();
     }
 }
 
@@ -4262,13 +4279,14 @@ int32_t llama_decode_mtp_async(
 
 int32_t llama_decode_mtp_wait(
         llama_context * ctx,
+        llama_seq_id  seq_id,
         llama_token * out_drafts,
         float       * out_h_prev_last) {
     if (!ctx) {
         LLAMA_LOG_ERROR("%s: ctx is NULL\n", __func__);
         return -1;
     }
-    return ctx->decode_mtp_wait(out_drafts, out_h_prev_last);
+    return ctx->decode_mtp_wait(seq_id, out_drafts, out_h_prev_last);
 }
 
 //

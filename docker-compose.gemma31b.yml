@@ -17,6 +17,7 @@ services:
       - PORT=8080
       # You can easily override script defaults here:
       - CTX=163840
+      - PARALLEL=2
       # - NGL=99
       # - SPEC=mtp
     entrypoint: ["/bin/bash", "/workspace/scripts/run-gemma4-31b-mtp-server.sh"]

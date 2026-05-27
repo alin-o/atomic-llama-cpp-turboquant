@@ -675,7 +675,7 @@ struct common_speculative_state_mtp : public common_speculative_state {
             return;
         }
         std::vector<llama_token> discard((size_t) pending_n_steps);
-        const int32_t rc = llama_decode_mtp_wait(ctx_tgt, discard.data(), /*out_h_prev_last*/ nullptr);
+        const int32_t rc = llama_decode_mtp_wait(ctx_tgt, seq_id, discard.data(), /*out_h_prev_last*/ nullptr);
         if (rc != 0) {
             LOG_ERR("%s: llama_decode_mtp_wait (drain) failed (%d)\n", __func__, (int) rc);
         }
@@ -777,7 +777,7 @@ struct common_speculative_state_mtp : public common_speculative_state {
             } else {
                 draft_tokens.resize((size_t) n_steps);
                 const int32_t rc = llama_decode_mtp_wait(
-                        ctx_tgt, draft_tokens.data(), /*out_h_prev_last*/ nullptr);
+                        ctx_tgt, seq_id, draft_tokens.data(), /*out_h_prev_last*/ nullptr);
                 has_pending     = false;
                 pending_n_steps = 0;
                 if (rc != 0) {
@@ -830,7 +830,7 @@ struct common_speculative_state_mtp : public common_speculative_state {
             LOG_ERR("%s: llama_decode_mtp_async failed (%d)\n", __func__, (int) rc);
             draft_tokens.clear();
         } else {
-            rc = llama_decode_mtp_wait(ctx_tgt, draft_tokens.data(), /*out_h_prev_last*/ nullptr);
+            rc = llama_decode_mtp_wait(ctx_tgt, seq_id, draft_tokens.data(), /*out_h_prev_last*/ nullptr);
             if (rc != 0) {
                 LOG_ERR("%s: llama_decode_mtp_wait failed (%d)\n", __func__, (int) rc);
                 draft_tokens.clear();

@@ -1022,8 +1022,10 @@ extern "C" {
     // This lets the main thread proceed with target verify while MTP encodes in parallel.
     //
     // Contract:
-    //   - At most one in-flight request per context. Submitting a second _async without
-    //     calling _wait first returns -7 (and leaves the previous request in flight).
+    //   - At most one in-flight request per seq_id. Submitting a second _async for the
+    //     same seq_id without calling _wait first returns -7 (the previous request is
+    //     left intact). Different seq_ids may have simultaneous in-flight requests; the
+    //     worker still processes them serially on a single sched_mtp.
     //   - h_prev must hold n_embd_backbone floats; the buffer is copied into the request,
     //     so the caller may free or modify it after _async returns.
     //   - The caller must guarantee that target KV positions ≤ attn_pos remain stable
@@ -1037,10 +1039,12 @@ extern "C" {
             const float * h_prev,
             int32_t       n_steps);
 
-    // Block until the in-flight MTP request completes. Copies up to n_steps drafts into
-    // out_drafts and the last hidden state into out_h_prev_last (may be NULL).
+    // Block until the in-flight MTP request for seq_id completes. Copies up to n_steps
+    // drafts into out_drafts and the last hidden state into out_h_prev_last (may be NULL).
+    // Concurrent waiters on different seq_ids are independent.
     LLAMA_API int32_t llama_decode_mtp_wait(
             struct llama_context * ctx,
+            llama_seq_id  seq_id,
             llama_token * out_drafts,
             float       * out_h_prev_last);
 

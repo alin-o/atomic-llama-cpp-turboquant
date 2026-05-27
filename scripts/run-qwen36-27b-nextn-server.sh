@@ -47,6 +47,7 @@ if [[ "$SPEC" == "nextn" ]]; then
 fi
 
 PARALLEL="${PARALLEL:-1}"
+KV_UNIFIED="${KV_UNIFIED:-1}"
 
 ARGS=(
   -m "$MAIN"
@@ -64,6 +65,8 @@ ARGS=(
   -np "$PARALLEL"
   --cont-batching
 )
+
+[[ "$KV_UNIFIED" != "0" ]] && ARGS+=(--kv-unified)
 
 if [[ "$SPEC" == "nextn" ]]; then
   ARGS+=(

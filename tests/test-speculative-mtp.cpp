@@ -125,7 +125,7 @@ int main() {
                 llama_model_free(model_tgt);
                 return 1;
             }
-            const int32_t rc_w = llama_decode_mtp_wait(ctx, drafts_async, nullptr);
+            const int32_t rc_w = llama_decode_mtp_wait(ctx, /*seq_id=*/0, drafts_async, nullptr);
             if (rc_w != 0) {
                 std::cerr << "llama_decode_mtp_wait returned " << rc_w << "\n";
                 llama_free(ctx);

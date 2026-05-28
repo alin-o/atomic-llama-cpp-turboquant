@@ -1245,7 +1245,7 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
-bool llama_context::ensure_sched_mtp() {
+bool llama_context::ensure_sched_mtp(llama_seq_id reserve_seq_id) {
     if (sched_mtp) {
         return true;
     }
@@ -1279,14 +1279,6 @@ bool llama_context::ensure_sched_mtp() {
             return false;
         }
 
-        llama_memory_context_ptr mctx = memory->init_full();
-        if (!mctx) {
-            LLAMA_LOG_ERROR("%s: failed to init memory context for MTP reserve\n", __func__);
-            sched_mtp.reset();
-            gf_res_prev_mtp.reset();
-            return false;
-        }
-
         const uint32_t n_bb = model.mtp_assistant->hparams.n_embd_backbone;
         auto data = std::make_shared<llama_ubatch::data_t>();
         data->token.resize(1);
@@ -1297,10 +1289,10 @@ bool llama_context::ensure_sched_mtp() {
         data->seq_id_data.resize(1);
         data->output.resize(1);
         data->seq_idx.resize(LLAMA_MAX_SEQ, -1);
-        data->seq_id_unq.push_back(0);
-        data->seq_idx[0] = 0;
+        data->seq_id_unq.push_back(reserve_seq_id);
+        data->seq_idx[(size_t) reserve_seq_id] = 0;
         data->n_seq_id[0] = 1;
-        data->seq_id_data[0] = 0;
+        data->seq_id_data[0] = reserve_seq_id;
         data->seq_id[0] = &data->seq_id_data[0];
         data->output[0] = 1;
 
@@ -1320,6 +1312,21 @@ bool llama_context::ensure_sched_mtp() {
         ub.seq_idx      = data->seq_idx.data();
         ub.output       = data->output.data();
         ub.data         = data;
+
+        // Use the same memory init path the runtime uses: init_mtp resolves the actual
+        // KV state for reserve_seq_id (which the target has already prefilled by now),
+        // so cross-attn into target KV gets n_kv >= 1 columns. init_full() returns the
+        // worst-case layout but for n_seq_max > 1 reports n_kv = 0 for unactivated
+        // slots, which would build an empty-column attention graph and the residual
+        // chain collapses every downstream layer's tensor to ne[1] = 0.
+        llama_memory_context_ptr mctx = kv_iswa->init_mtp(reserve_seq_id, ub);
+        if (!mctx || mctx->get_status() != LLAMA_MEMORY_STATUS_SUCCESS) {
+            LLAMA_LOG_ERROR("%s: init_mtp(seq_id=%d) failed for MTP reserve\n",
+                    __func__, (int) reserve_seq_id);
+            sched_mtp.reset();
+            gf_res_prev_mtp.reset();
+            return false;
+        }
 
         const uint32_t save_n_outputs = n_outputs;
         n_outputs = 1;
@@ -2570,7 +2577,7 @@ int32_t llama_context::decode_mtp_sync(
         return -3;
     }
 
-    if (!ensure_sched_mtp()) {
+    if (!ensure_sched_mtp(seq_id)) {
         LLAMA_LOG_ERROR("%s: failed to initialize MTP scheduler\n", __func__);
         return -8;
     }
@@ -2687,7 +2694,7 @@ int32_t llama_context::decode_mtp_async(
         return -2;
     }
 
-    if (!ensure_sched_mtp()) {
+    if (!ensure_sched_mtp(seq_id)) {
         LLAMA_LOG_ERROR("%s: failed to initialize MTP scheduler\n", __func__);
         return -8;
     }

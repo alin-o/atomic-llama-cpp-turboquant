@@ -458,7 +458,12 @@ private:
     std::mutex backend_cfg_mu;
 
     // Lazily create sched_mtp and reserve its compute buffers on the first MTP call.
-    bool ensure_sched_mtp();
+    // reserve_seq_id is the seq the caller is about to drive; its KV must be populated
+    // (the cross-attn into target KV needs n_kv >= 1 or the reserve graph builds with
+    // 0-column attention output and downstream reshapes fail). With n_seq_max == 1
+    // init_full() incidentally satisfied this, but for n_seq_max > 1 we must route
+    // the reservation through init_mtp(seq_id) like the runtime path does.
+    bool ensure_sched_mtp(llama_seq_id reserve_seq_id);
 
     // Run the MTP graph for one ubatch on sched_mtp / gf_res_prev_mtp. Mirrors
     // process_ubatch() but is fully isolated from the target sched.

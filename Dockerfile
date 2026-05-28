@@ -21,6 +21,7 @@ RUN cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON \
     -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=1 \
     -DCMAKE_CUDA_ARCHITECTURES=89 \
     -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc \
+#    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     && cmake --build build --config Release --target llama-server -j$(nproc)
 
 FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04

@@ -16,11 +16,11 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       # You can easily override script defaults here:
-      - CTX=63840
+      - CTX=163840
       # - NGL=99
       # - SPEC=mtp
       - PARALLEL=1
-      - KV_UNIFIED=1
+      - KV_UNIFIED=0
     entrypoint: ["/bin/bash", "/workspace/scripts/run-gemma4-mtp-server.sh"]
     deploy:
       resources:

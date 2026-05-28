@@ -8,6 +8,14 @@ services:
       - .:/workspace:ro  # Mounts the workspace to access scripts and models
       - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
       - /mnt/S/.cache/huggingface:/root/.cache/huggingface
+    ulimits:
+      core:
+        soft: -1
+        hard: -1
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined    
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_ASSISTANT_GGUF=0  # Disables python validation script in container
@@ -16,12 +24,14 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       # You can easily override script defaults here:
-      - CTX=63840
+      - CTX=163840
       # - NGL=99
       # - SPEC=mtp
-      - PARALLEL=1
-      - KV_UNIFIED=1
+      - PARALLEL=2
+      - KV_UNIFIED=0
+      - LLAMA_GRAPH_REUSE_DISABLE=1
     entrypoint: ["/bin/bash", "/workspace/scripts/run-gemma4-31b-mtp-server.sh"]
+
     deploy:
       resources:
         reservations:

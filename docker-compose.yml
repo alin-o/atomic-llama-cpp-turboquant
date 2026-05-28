@@ -15,11 +15,16 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       # You can override script defaults here if needed:
-      - CTX=100080
+      - CTX=20000
       # - NGL=99
       - SPEC=nextn
       - PARALLEL=2
       - KV_UNIFIED=1
+      - LLAMA_ARG_THINK_BUDGET=512
+      - LLAMA_ARG_THINK_BUDGET_MESSAGE=Wrap up.
+      - LLAMA_ARG_MMPROJ=/root/.cache/huggingface/hub/models--unsloth--Qwen3.6-27B-MTP-GGUF/snapshots/5cb35eb3dcbf52dbce5f87dbc64df6aaffadcace/mmproj-BF16.gguf
+      - LLAMA_ARG_MMPROJ_OFFLOAD=0  # uncomment to keep vision tower on CPU (~1 GiB VRAM saved)
+
     entrypoint: ["/bin/bash", "/workspace/scripts/run-qwen36-27b-nextn-server.sh"]
     deploy:
       resources:

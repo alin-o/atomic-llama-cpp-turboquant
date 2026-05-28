@@ -2296,7 +2296,7 @@ private:
             // NextN/MTP prime requires per-token target hidden states which the mtmd image-decode
             // path does not produce. Until that is wired in, skip drafting for slots whose prompt
             // contains image chunks - the slot still works as a normal (non-speculative) decode.
-            const bool skip_draft_mtmd = mctx && slot.prompt.tokens.has_mtmd;
+            const bool skip_draft_mtmd = mctx && slot.prompt.tokens.has_media_chunks();
             const int  n_draft_max     = skip_draft_mtmd ? 0 : n_draft_max_raw;
 
             if (n_draft_max > 0) {

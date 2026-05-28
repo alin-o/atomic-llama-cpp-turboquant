@@ -200,6 +200,10 @@ public:
 
     bool empty() const { return tokens.empty(); }
 
+    // Whether this token stream actually contains media chunks (not just whether
+    // the slot is mtmd-capable). Distinct from has_mtmd, which is a capability flag.
+    bool has_media_chunks() const { return !map_idx_to_media.empty(); }
+
     void clear() {
         map_idx_to_media.clear();
         tokens.clear();

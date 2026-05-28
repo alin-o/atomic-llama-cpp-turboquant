@@ -8,6 +8,10 @@ services:
       - .:/workspace:ro  # Mounts the workspace to access scripts and models
       - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
       - /mnt/S/.cache/huggingface:/root/.cache/huggingface
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock: -1
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_NEXTN_GGUF=0  # Disables python validation script in container
@@ -15,14 +19,17 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       # You can override script defaults here if needed:
-      - CTX=300000
+      - CTX=256000
       # - NGL=99
-      - SPEC=nextn
-      - LLAMA_ARG_N_CPU_MOE=16        # offload experts of first 24 layers; tune until VRAM fits the CTX you want
+      # - SPEC=nextn
+      - LLAMA_ARG_N_CPU_MOE=12        # offload experts of first 24 layers; tune until VRAM fits the CTX you want
+      - LLAMA_ARG_MLOCK=1
       - LLAMA_ARG_MMPROJ=/root/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-MTP-GGUF/snapshots/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/mmproj-BF16.gguf
-      # - LLAMA_ARG_MMPROJ_OFFLOAD=0  # uncomment to keep vision tower on CPU (~1 GiB VRAM saved)
+      - LLAMA_ARG_MMPROJ_OFFLOAD=0  # uncomment to keep vision tower on CPU (~1 GiB VRAM saved)
       - PARALLEL=3
       - KV_UNIFIED=1
+      - LLAMA_ARG_THINK_BUDGET=512
+      - LLAMA_ARG_THINK_BUDGET_MESSAGE=Wrap up.
     entrypoint: ["/bin/bash", "/workspace/scripts/run-qwen36-35ba3b-nextn-server.sh"]
     deploy:
       resources:

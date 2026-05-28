@@ -15,11 +15,11 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       # You can override script defaults here if needed:
-      - CTX=63840
-      - PARALLEL=2
+      - CTX=100080
       # - NGL=99
       - SPEC=nextn
-      - LLAMA_LOG_VERBOSE=1 
+      - PARALLEL=2
+      - KV_UNIFIED=1
     entrypoint: ["/bin/bash", "/workspace/scripts/run-qwen36-27b-nextn-server.sh"]
     deploy:
       resources:

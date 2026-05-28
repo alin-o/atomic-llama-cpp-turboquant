@@ -25,9 +25,14 @@ bool common_speculative_is_mtmd_safe(enum common_speculative_type type);
 // True iff every registered impl is mtmd-safe (rejects mixed chains e.g. ngram + draft model).
 bool common_speculative_all_impls_mtmd_safe(const common_speculative * spec);
 
+// If ctx_dft_external is non-null, it is used as the draft context (caller retains ownership;
+// must outlive every speculative impl that references it). When null, a fresh per-impl draft
+// context is created internally (legacy behavior). Sharing one ctx_dft across slots avoids
+// the per-slot compute-buffer + draft-KV duplication that OOM's under np>1.
 common_speculative * common_speculative_init(
         common_params_speculative & params,
-        llama_context             * ctx_tgt);
+        llama_context             * ctx_tgt,
+        llama_context             * ctx_dft_external = nullptr);
 
 void common_speculative_free(common_speculative * spec);
 

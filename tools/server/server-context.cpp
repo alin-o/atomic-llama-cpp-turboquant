@@ -11,6 +11,9 @@
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+// Internal API: llama_set_embeddings_pre_norm + llama_set_nextn for wiring the
+// shared NextN draft context to the target. Matches common/speculative.cpp.
+#include "../../src/llama-ext.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -598,6 +601,14 @@ private:
 
     llama_model_ptr model_dft;
 
+    // Shared draft context across all slots (single ctx_dft / ctx_nextn with
+    // n_seq_max = n_parallel). Replaces the previous per-slot draft contexts
+    // which OOM'd under np>1 because each slot allocated its own compute pp
+    // buffer. Per-slot draft state is now keyed by seq_id (= slot.id) inside
+    // this one ctx; the draft worker_loops serialize through a context-level
+    // mutex held inside the impl.
+    llama_context_ptr ctx_dft_shared;
+
     bool add_bos_token = true;
 
     int32_t n_ctx; // total context for all clients / slots
@@ -728,11 +739,13 @@ private:
                             (unsigned) llama_model_n_nextn_predict_layers(model));
 
                     auto params_dft = params_base;
-                    params_dft.n_parallel   = 1;
+                    // n_parallel on the SHARED draft context = number of target slots, so the
+                    // draft KV can hold one seq per slot. Replaces the previous per-slot ctx_nextn
+                    // (which duplicated compute pp buffers + KV per slot and OOM'd under np>1).
+                    params_dft.n_parallel   = params_base.n_parallel;
                     params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
-                    // Cap draft n_batch to target's configured n_batch. Without this, kv_unified=true
-                    // makes llama_n_ctx_seq(ctx) the full n_ctx, which would sink ~n_ctx-sized compute
-                    // pp buffers into every per-slot draft context and OOM under np>1.
+                    // Cap draft n_batch to target's configured n_batch (kv_unified=true otherwise
+                    // makes llama_n_ctx_seq(ctx) the full n_ctx and the pp buffer explodes).
                     params_dft.n_batch      = std::min<uint32_t>(params_base.n_batch, llama_n_ctx_seq(ctx));
                     params_dft.cache_type_k = params_spec.cache_type_k;
                     params_dft.cache_type_v = params_spec.cache_type_v;
@@ -747,6 +760,18 @@ private:
 
                     params_base.speculative.model_dft   = model;
                     params_base.speculative.cparams_dft = cparams_dft;
+
+                    // Allocate the one shared ctx_nextn here so per-slot common_speculative_init
+                    // calls don't each create their own. Pre-norm + nextn attachment on ctx_tgt
+                    // is context-wide state and is wired up once on this shared ctx.
+                    ctx_dft_shared.reset(llama_init_from_model(model, cparams_dft));
+                    if (!ctx_dft_shared) {
+                        SRV_ERR("%s\n", "failed to allocate shared NextN draft context");
+                        return false;
+                    }
+                    llama_set_embeddings_pre_norm(ctx,                    true);
+                    llama_set_embeddings_pre_norm(ctx_dft_shared.get(),   true);
+                    llama_set_nextn(ctx, ctx_dft_shared.get());
                 } else {
                     if (target_has_nextn) {
                         SRV_INF("NextN draft: standalone GGUF '%s' (target has NextN but user pointed --model-draft at a separate file)\n",
@@ -758,11 +783,9 @@ private:
                     }
 
                     auto params_dft = params_base;
-                    params_dft.n_parallel   = 1;
+                    params_dft.n_parallel   = params_base.n_parallel;
                     params_dft.n_ctx        = params_spec.n_ctx == 0 ? llama_n_ctx_seq(ctx) : params_spec.n_ctx;
-                    // Cap draft n_batch to target's configured n_batch. Without this, kv_unified=true
-                    // makes llama_n_ctx_seq(ctx) the full n_ctx, which would sink ~n_ctx-sized compute
-                    // pp buffers into every per-slot draft context and OOM under np>1.
+                    // Cap draft n_batch to target's configured n_batch.
                     params_dft.n_batch      = std::min<uint32_t>(params_base.n_batch, llama_n_ctx_seq(ctx));
                     params_dft.devices      = params_spec.devices;
                     params_dft.model        = params_spec.mparams_dft;
@@ -782,9 +805,21 @@ private:
                         return false;
                     }
 
+                    auto cparams_dft = common_context_params_to_llama(params_dft);
+                    cparams_dft.n_rs_seq = 0;
+
                     params_base.speculative.model_dft   = model_dft.get();
-                    params_base.speculative.cparams_dft = common_context_params_to_llama(params_dft);
-                    params_base.speculative.cparams_dft.n_rs_seq = 0;
+                    params_base.speculative.cparams_dft = cparams_dft;
+
+                    // Allocate shared ctx_nextn from the standalone draft model (same wiring as shared-model path).
+                    ctx_dft_shared.reset(llama_init_from_model(model_dft.get(), cparams_dft));
+                    if (!ctx_dft_shared) {
+                        SRV_ERR("%s\n", "failed to allocate shared NextN draft context");
+                        return false;
+                    }
+                    llama_set_embeddings_pre_norm(ctx,                    true);
+                    llama_set_embeddings_pre_norm(ctx_dft_shared.get(),   true);
+                    llama_set_nextn(ctx, ctx_dft_shared.get());
                 }
             } else {
                 SRV_INF("loading draft model '%s'\n", params_base.speculative.mparams_dft.path.c_str());
@@ -923,7 +958,10 @@ private:
 
             // try speculative decoding
             if (can_spec) {
-                slot.spec = common_speculative_init(params_base.speculative, slot.ctx);
+                // Pass the shared draft context if we allocated one (NextN paths). When null,
+                // common_speculative_init falls back to creating its own per-impl ctx_dft
+                // (legacy state_draft path with model_dft as a separate llama_model).
+                slot.spec = common_speculative_init(params_base.speculative, slot.ctx, ctx_dft_shared.get());
                 if (slot.spec) {
                     if (mctx && !common_speculative_all_impls_mtmd_safe(slot.spec)) {
                         SRV_ERR("%s\n", "speculative decoding with this type is not supported with multimodal");

@@ -3853,7 +3853,11 @@ bool llama_context_nextn_seq_rm(
     }
     const bool ok = llama_memory_seq_rm(llama_get_memory(ctx), seq_id, p0, p1);
     if (llama_context * ctx_nextn = ctx->get_nextn()) {
-        llama_memory_seq_rm(llama_get_memory(ctx_nextn), 0, p0, p1);
+        // Use the same seq_id on the draft side. With shared ctx_nextn (one ctx,
+        // n_seq_max = n_parallel), each slot's draft state lives at seq_id == slot.id.
+        // For legacy per-slot ctx_nextn the only valid seq is 0, but the server's
+        // single slot also has id 0, so this remains correct.
+        llama_memory_seq_rm(llama_get_memory(ctx_nextn), seq_id, p0, p1);
     }
     return ok;
 }

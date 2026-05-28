@@ -211,6 +211,7 @@ struct common_speculative_state {
 struct common_speculative_state_draft : public common_speculative_state {
     llama_context * ctx_tgt; // only used for retokenizing from ctx_dft
     llama_context * ctx_dft;
+    bool            owns_ctx_dft = true; // false when ctx_dft is shared/externally-owned
 
     common_sampler * smpl;
 
@@ -224,10 +225,12 @@ struct common_speculative_state_draft : public common_speculative_state {
             enum common_speculative_type type,
             llama_context * ctx_tgt,
             llama_context * ctx_dft,
+            bool            owns_ctx_dft,
             const std::vector<std::pair<std::string, std::string>> & replacements)
         : common_speculative_state(type)
         , ctx_tgt(ctx_tgt)
         , ctx_dft(ctx_dft)
+        , owns_ctx_dft(owns_ctx_dft)
     {
         batch = llama_batch_init(llama_n_batch(ctx_dft), 0, 1);
         smpl = nullptr;
@@ -272,9 +275,10 @@ struct common_speculative_state_draft : public common_speculative_state {
     }
 
     ~common_speculative_state_draft() override {
-        llama_perf_context_print(ctx_dft);
-
-        llama_free(ctx_dft);
+        if (owns_ctx_dft) {
+            llama_perf_context_print(ctx_dft);
+            llama_free(ctx_dft);
+        }
 
         common_sampler_free(smpl);
 
@@ -946,9 +950,26 @@ static bool common_speculative_are_compatible_nextn(
     return common_speculative_are_compatible_mtp(model_tgt, model_dft);
 }
 
+// Returns a shared mutex keyed by ctx pointer. Used to serialize llama_decode +
+// llama_memory_seq_* operations on a draft context that's shared across slots.
+// Lazily creates a mutex per distinct ctx_nextn pointer.
+static std::mutex & shared_ctx_nextn_mu_for(llama_context * ctx) {
+    static std::mutex map_mu;
+    static std::map<llama_context *, std::unique_ptr<std::mutex>> table;
+    std::lock_guard<std::mutex> lk(map_mu);
+    auto it = table.find(ctx);
+    if (it == table.end()) {
+        it = table.emplace(ctx, std::make_unique<std::mutex>()).first;
+    }
+    return *it->second;
+}
+
 struct common_speculative_state_nextn : public common_speculative_state {
     llama_context * ctx_tgt   = nullptr;
     llama_context * ctx_nextn = nullptr;
+    bool            owns_ctx_nextn = true;  // false when ctx_nextn is shared across slots
+    llama_seq_id    seq_id_dft = 0;          // draft-side seq id (= target slot.id when shared)
+    std::mutex *    ctx_nextn_mu = nullptr;  // shared mutex protecting ctx_nextn (always set)
 
     llama_batch batch;
     common_sampler * smpl = nullptr;
@@ -982,11 +1003,17 @@ struct common_speculative_state_nextn : public common_speculative_state {
     llama_tokens        pipe_res_drafts;
     int32_t             pipe_res_actual_steps = 0; // how many decodes the worker actually completed
 
-    common_speculative_state_nextn(enum common_speculative_type type, llama_context * ctx_tgt, llama_context * ctx_nextn_in)
-            : common_speculative_state(type), ctx_tgt(ctx_tgt), ctx_nextn(ctx_nextn_in) {
+    common_speculative_state_nextn(enum common_speculative_type type, llama_context * ctx_tgt, llama_context * ctx_nextn_in, bool owns_ctx_nextn)
+            : common_speculative_state(type), ctx_tgt(ctx_tgt), ctx_nextn(ctx_nextn_in), owns_ctx_nextn(owns_ctx_nextn) {
         GGML_ASSERT(ctx_tgt && ctx_nextn);
         const llama_model * model_nextn = llama_get_model(ctx_nextn);
         n_embd = llama_model_n_embd(model_nextn);
+
+        // The mutex serializes ctx_nextn access across slots (worker threads, plus
+        // main-thread prime in begin()). Keyed by ctx pointer so all slots sharing
+        // one ctx_nextn share the same mutex. Owned ctx still uses the table — the
+        // map entry stays alive for the lifetime of the context, harmless.
+        ctx_nextn_mu = &shared_ctx_nextn_mu_for(ctx_nextn);
 
         {
             common_params_sampling sparams;
@@ -1000,12 +1027,17 @@ struct common_speculative_state_nextn : public common_speculative_state {
         batch.token = (llama_token *) malloc(sizeof(llama_token));
         batch.n_tokens      = 1;
         batch.n_seq_id[0]   = 1;
-        batch.seq_id[0][0]  = 0;
+        batch.seq_id[0][0]  = 0; // updated per-decode to seq_id_dft
         batch.logits[0]     = 1;
 
-        llama_set_embeddings_pre_norm(ctx_tgt, true);
-        llama_set_embeddings_pre_norm(ctx_nextn, true);
-        llama_set_nextn(ctx_tgt, ctx_nextn);
+        // Pre-norm + nextn attachment on ctx_tgt is *context-wide* state. When ctx_nextn
+        // is shared, the server already wires this up once at allocation; per-slot
+        // re-toggling would race and be no-op anyway. Only do it for owned (legacy) ctx.
+        if (owns_ctx_nextn) {
+            llama_set_embeddings_pre_norm(ctx_tgt, true);
+            llama_set_embeddings_pre_norm(ctx_nextn, true);
+            llama_set_nextn(ctx_tgt, ctx_nextn);
+        }
 
         if (const char * v = std::getenv("LLAMA_PIPELINE_DEPTH2")) {
             if (std::strcmp(v, "0") == 0) {
@@ -1028,15 +1060,18 @@ struct common_speculative_state_nextn : public common_speculative_state {
                 worker_thread.join();
             }
         }
-        llama_set_embeddings_pre_norm(ctx_tgt, false);
-        llama_set_embeddings_pre_norm(ctx_nextn, false);
-        llama_set_nextn(ctx_tgt, nullptr);
+        // Only toggle ctx_tgt-wide state when we owned ctx_nextn (legacy single-slot path).
+        if (owns_ctx_nextn) {
+            llama_set_embeddings_pre_norm(ctx_tgt, false);
+            llama_set_embeddings_pre_norm(ctx_nextn, false);
+            llama_set_nextn(ctx_tgt, nullptr);
+        }
         llama_batch_free(batch);
         common_sampler_free(smpl);
-        if (ctx_nextn) {
+        if (ctx_nextn && owns_ctx_nextn) {
             llama_free(ctx_nextn);
-            ctx_nextn = nullptr;
         }
+        ctx_nextn = nullptr;
     }
 
     // Worker loop: blocks on pipe_cv, runs draft chain on ctx_nextn, publishes result.
@@ -1064,6 +1099,14 @@ struct common_speculative_state_nextn : public common_speculative_state {
             int32_t actual_steps = 0;
             llama_token cond_tok = id_last;
             llama_pos   pos      = pos_start;
+
+            // Serialize ctx_nextn access for the whole chain. With shared ctx_nextn
+            // across slots, another slot's worker (or the main-thread prime path)
+            // could otherwise race on the same context.
+            std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
+
+            // Route this slot's draft to its own seq_id in the shared context's KV.
+            batch.seq_id[0][0] = seq_id_dft;
 
             for (int32_t k = 0; k < n_steps; ++k) {
                 const float * src = nullptr;
@@ -1119,10 +1162,11 @@ struct common_speculative_state_nextn : public common_speculative_state {
         }
         pipe_has_pending = false;
         if (advanced > 0) {
-            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0);
+            std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
+            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft);
             if (pos_max >= 0) {
                 const llama_pos drop_from = pos_max - advanced + 1;
-                llama_memory_seq_rm(llama_get_memory(ctx_nextn), 0, drop_from, -1);
+                llama_memory_seq_rm(llama_get_memory(ctx_nextn), seq_id_dft, drop_from, -1);
             }
         }
     }
@@ -1136,12 +1180,17 @@ struct common_speculative_state_nextn : public common_speculative_state {
             return;
         }
 
+        // Hold the shared ctx mutex for the duration of the prime — we both read the
+        // draft KV pos_max and write a long sequence of decodes; another slot's worker
+        // mustn't interleave.
+        std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
+
         // If the draft KV cache is already aligned with the current prompt
         // (e.g. prompt-cache reuse across requests), skip the prime. Otherwise we
         // need to seed ctx_nextn token-by-token from the target's pre-norm hidden
         // states. Target prefill must have been driven with logits=true on every
         // prompt token (see server-context: nextn_prefill_all_outputs).
-        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0);
+        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft);
         if (pos_max >= N - 1) {
             return;
         }
@@ -1149,8 +1198,9 @@ struct common_speculative_state_nextn : public common_speculative_state {
         // Ensure target pre-norm rows are materialized in host memory.
         llama_synchronize(ctx_tgt);
 
-        // Drop any stale draft KV state to make absolute positions match the prompt.
-        llama_memory_clear(llama_get_memory(ctx_nextn), false);
+        // Drop any stale draft KV state for *this* seq to make absolute positions match the prompt.
+        // Critically: don't llama_memory_clear() — that wipes OTHER slots' KV state too.
+        llama_memory_seq_rm(llama_get_memory(ctx_nextn), seq_id_dft, -1, -1);
 
         // Sanity: the precomputed batch.embd buffer was sized for n_embd floats.
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
@@ -1158,7 +1208,8 @@ struct common_speculative_state_nextn : public common_speculative_state {
         // Prime path: we don't need draft logits during seeding (no sampling here),
         // so disable per-step lm_head compute for speed. Restore logits=1 afterwards
         // so the regular chain-draft path in draft() works unchanged.
-        batch.logits[0] = 0;
+        batch.logits[0]    = 0;
+        batch.seq_id[0][0] = seq_id_dft;
 
         int32_t primed = 0;
         for (int32_t i = 0; i < N; ++i) {
@@ -1184,8 +1235,8 @@ struct common_speculative_state_nextn : public common_speculative_state {
         // Restore default for draft() path which samples after every decode.
         batch.logits[0] = 1;
 
-        LOG_DBG("%s: primed ctx_nextn with %d/%d prompt tokens\n",
-                __func__, (int) primed, (int) N);
+        LOG_DBG("%s: primed ctx_nextn (seq_id=%d) with %d/%d prompt tokens\n",
+                __func__, (int) seq_id_dft, (int) primed, (int) N);
     }
 
     void draft(
@@ -1213,13 +1264,16 @@ struct common_speculative_state_nextn : public common_speculative_state {
             return;
         }
 
+        // Sync-draft path: serialize ctx_nextn for the whole chain.
+        std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
+
         if (last_n_drafted > 0) {
             const int32_t n_to_drop = (int32_t) last_n_drafted - 1;
             if (n_to_drop > 0) {
-                const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0);
+                const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft);
                 if (pos_max >= 0) {
                     const llama_pos drop_from = pos_max - n_to_drop + 1;
-                    llama_memory_seq_rm(llama_get_memory(ctx_nextn), 0, drop_from, -1);
+                    llama_memory_seq_rm(llama_get_memory(ctx_nextn), seq_id_dft, drop_from, -1);
                 }
             }
             last_n_drafted  = 0;
@@ -1229,8 +1283,10 @@ struct common_speculative_state_nextn : public common_speculative_state {
         const int32_t n_max = std::max(1, params.n_max);
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
 
+        batch.seq_id[0][0] = seq_id_dft;
+
         llama_token cond_tok = id_last;
-        llama_pos   pos      = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0) + 1;
+        llama_pos   pos      = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft) + 1;
 
         for (int32_t k = 0; k < n_max; ++k) {
             float * src_row_ptr = nullptr;
@@ -1271,7 +1327,9 @@ struct common_speculative_state_nextn : public common_speculative_state {
     }
 
     void accept(uint16_t n_accepted) override {
-        const llama_pos pos_max       = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0);
+        std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
+
+        const llama_pos pos_max       = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft);
         const int32_t   n_drafted_last = (int32_t) last_n_drafted;
         const int32_t   n_to_drop      = std::max(0, n_drafted_last - (int32_t) n_accepted - 1);
 
@@ -1281,7 +1339,7 @@ struct common_speculative_state_nextn : public common_speculative_state {
         }
         if (n_to_drop > 0) {
             const llama_pos drop_from = pos_max - n_to_drop + 1;
-            llama_memory_seq_rm(llama_get_memory(ctx_nextn), /*seq_id=*/ 0,
+            llama_memory_seq_rm(llama_get_memory(ctx_nextn), seq_id_dft,
                     /*p0=*/ drop_from, /*p1=*/ -1);
         }
         last_n_drafted  = 0;
@@ -1308,12 +1366,13 @@ struct common_speculative_state_nextn : public common_speculative_state {
         // KV state, which empirically tanks acceptance from ~82% to ~66% over
         // a long generation. Mirror the sync rollback here.
         if (last_n_drafted > 0) {
+            std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
             const int32_t n_to_drop = (int32_t) last_n_drafted - 1;
             if (n_to_drop > 0) {
-                const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0);
+                const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft);
                 if (pos_max >= 0) {
                     const llama_pos drop_from = pos_max - n_to_drop + 1;
-                    llama_memory_seq_rm(llama_get_memory(ctx_nextn), 0, drop_from, -1);
+                    llama_memory_seq_rm(llama_get_memory(ctx_nextn), seq_id_dft, drop_from, -1);
                 }
             }
             last_n_drafted  = 0;
@@ -1338,7 +1397,11 @@ struct common_speculative_state_nextn : public common_speculative_state {
         // acceptance rate and tank end-to-end throughput; revisit once tree
         // drafting / multi-seq KV are wired in.
         const int32_t n_steps = 1;
-        const llama_pos pos_start = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), 0) + 1;
+        llama_pos pos_start = 0;
+        {
+            std::lock_guard<std::mutex> ctx_lk(*ctx_nextn_mu);
+            pos_start = llama_memory_seq_pos_max(llama_get_memory(ctx_nextn), seq_id_dft) + 1;
+        }
 
         {
             std::lock_guard<std::mutex> lk(pipe_mu);
@@ -1763,10 +1826,16 @@ done:
 //
 common_speculative * common_speculative_init(
         common_params_speculative & params,
-        llama_context             * ctx_tgt) {
+        llama_context             * ctx_tgt,
+        llama_context             * ctx_dft_external) {
     llama_context * ctx_dft = nullptr;
+    // If the caller provides an externally-owned draft context (shared across slots),
+    // use it. Otherwise create a per-impl context, which we'll own.
     // Gemma4 MTP loads the assistant into the target model (llama_model_load_mtp_from_file); no second context.
-    if (params.model_dft && params.type != COMMON_SPECULATIVE_TYPE_MTP) {
+    const bool owns_ctx_dft = (ctx_dft_external == nullptr);
+    if (ctx_dft_external) {
+        ctx_dft = ctx_dft_external;
+    } else if (params.model_dft && params.type != COMMON_SPECULATIVE_TYPE_MTP) {
         ctx_dft = llama_init_from_model(params.model_dft, params.cparams_dft);
         if (ctx_dft == nullptr) {
             LOG_ERR("%s", "failed to create draft context\n");
@@ -1881,6 +1950,7 @@ common_speculative * common_speculative_init(
                 impls.push_back(std::make_unique<common_speculative_state_draft>(config.type,
                     /* .ctx_tgt      = */ ctx_tgt,
                     /* .ctx_dft      = */ ctx_dft,
+                    /* .owns_ctx_dft = */ owns_ctx_dft,
                     /* .replacements = */ params.replacements
                 ));
                 break;
@@ -1894,7 +1964,7 @@ common_speculative * common_speculative_init(
                 break;
             }
             case COMMON_SPECULATIVE_TYPE_NEXTN: {
-                impls.push_back(std::make_unique<common_speculative_state_nextn>(config.type, ctx_tgt, ctx_dft));
+                impls.push_back(std::make_unique<common_speculative_state_nextn>(config.type, ctx_tgt, ctx_dft, owns_ctx_dft));
                 break;
             }
             case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE: {
@@ -1965,6 +2035,14 @@ void common_speculative_set_seq_id(common_speculative * spec, llama_seq_id seq_i
     for (auto & impl : spec->impls) {
         if (impl->type == COMMON_SPECULATIVE_TYPE_MTP) {
             static_cast<common_speculative_state_mtp *>(impl.get())->seq_id = seq_id;
+        } else if (impl->type == COMMON_SPECULATIVE_TYPE_NEXTN) {
+            auto * st = static_cast<common_speculative_state_nextn *>(impl.get());
+            // Only route to a per-slot draft seq when ctx_nextn is SHARED.
+            // Legacy per-slot ctx_nextn was created with n_parallel=1 → only seq 0
+            // exists, and forcing seq_id_dft != 0 would break KV operations on it.
+            if (!st->owns_ctx_nextn) {
+                st->seq_id_dft = seq_id;
+            }
         }
     }
 }

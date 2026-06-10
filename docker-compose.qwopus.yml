@@ -11,11 +11,11 @@ services:
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_NEXTN_GGUF=0  # Disables python validation script in container
-      - MAIN_GGUF=/root/.cache/huggingface/hub/models--unsloth--Qwen3.6-27B-MTP-GGUF/snapshots/5cb35eb3dcbf52dbce5f87dbc64df6aaffadcace/Qwen3.6-27B-Q4_K_M.gguf
+      - MAIN_GGUF=/root/.cache/huggingface/hub/models--Jackrong--Qwopus3.6-27B-v2-GGUF/snapshots/f79e3a873876d511e96768cf713105b4e7f81eab/Qwopus3.6-27B-v2-Q4_K_M.gguf
       - HOST=0.0.0.0
       - PORT=8080
       # You can override script defaults here if needed:
-      - CTX=128000
+      - CTX=200000
       # - NGL=99
       - SPEC=nextn
       - PARALLEL=1

@@ -11,8 +11,9 @@ services:
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_ASSISTANT_GGUF=0  # Disables python validation script in container
-      - MAIN_GGUF=/root/.cache/huggingface/hub/models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/4006d4d95819e0a4975eae220762f1552dc2f699/gemma-4-26B-A4B-it-Q4_K_M.gguf
-      - DRAFT_GGUF=/root/.cache/huggingface/hub/models--AtomicChat--gemma-4-26B-A4B-it-assistant-GGUF/snapshots/171ecca181ec00ed6ffacb573195aa7c644bbdc6/gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf
+      - MAIN_GGUF=/root/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/3f09de26549e6d7ea54f1b83755149f840fcd333/gemma-4-12b-it-UD-Q8_K_XL.gguf
+      #- DRAFT_GGUF=/root/.cache/huggingface/hub/models--AtomicChat--gemma-4-26B-A4B-it-assistant-GGUF/snapshots/171ecca181ec00ed6ffacb573195aa7c644bbdc6/gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf
+      - DRAFT_GGUF=/root/.cache/huggingface/hub/models--Janvitos--gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF/snapshots/f5fdc2cdfa1a1257cf6d979fb17f1c94f9852ec4/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf
       - HOST=0.0.0.0
       - PORT=8080
       # You can easily override script defaults here:

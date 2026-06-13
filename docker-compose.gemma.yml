@@ -5,12 +5,12 @@ services:
     ports:
       - "8881:8080"
     volumes:
-      - .:/workspace:ro  # Mounts the workspace to access scripts and models
+      - .:/workspace:ro # Mounts the workspace to access scripts and models
       - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
       - /mnt/S/.cache/huggingface:/root/.cache/huggingface
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
-      - VERIFY_ASSISTANT_GGUF=0  # Disables python validation script in container
+      - VERIFY_ASSISTANT_GGUF=0 # Disables python validation script in container
       - MAIN_GGUF=/root/.cache/huggingface/hub/models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/4006d4d95819e0a4975eae220762f1552dc2f699/gemma-4-26B-A4B-it-Q4_K_M.gguf
       - DRAFT_GGUF=/root/.cache/huggingface/hub/models--AtomicChat--gemma-4-26B-A4B-it-assistant-GGUF/snapshots/171ecca181ec00ed6ffacb573195aa7c644bbdc6/gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf
       - HOST=0.0.0.0
@@ -19,15 +19,21 @@ services:
       - CTX=262144
       # - NGL=99
       # - SPEC=mtp
-      - LLAMA_ARG_CACHE_RAM=32618
-      - SLOT_SAVE_PATH=/root/.cache/llama.cpp/kv  # persisted KV caches (rw mount); enables /slots?action=save|restore
+      - LLAMA_ARG_CACHE_RAM=10240
+      - SLOT_SAVE_PATH=/root/.cache/llama.cpp/kv # persisted KV caches (rw mount); enables /slots?action=save|restore
       - PARALLEL=1
       - KV_UNIFIED=0
-    entrypoint: ["/bin/bash", "/workspace/scripts/run-gemma4-mtp-server.sh"]
+      - LLAMA_ARG_THREADS=4
+      - LLAMA_ARG_THREADS_HTTP=4
+    entrypoint: [ "/bin/bash", "/workspace/scripts/run-gemma4-mtp-server.sh" ]
+    cpuset: "0-7"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
+        limits:
+          cpus: 8
+          memory: 16G

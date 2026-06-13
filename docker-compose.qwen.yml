@@ -5,7 +5,7 @@ services:
     ports:
       - "8881:8080"
     volumes:
-      - .:/workspace:ro  # Mounts the workspace to access scripts and models
+      - .:/workspace:ro # Mounts the workspace to access scripts and models
       - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
       - /mnt/S/.cache/huggingface:/root/.cache/huggingface
     cap_add:
@@ -14,29 +14,37 @@ services:
       memlock: -1
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
-      - VERIFY_NEXTN_GGUF=0  # Disables python validation script in container
+      - VERIFY_NEXTN_GGUF=0 # Disables python validation script in container
       - MAIN_GGUF=/root/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-MTP-GGUF/snapshots/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
       - HOST=0.0.0.0
       - PORT=8080
       # You can override script defaults here if needed:
-      - CTX=256000
-      # - NGL=99
-      - SPEC=nextn
+      - CTX=81920
+      - NGL=99
+      - SPEC=off # nextn / off: saves ~585 MiB VRAM (draft compute+KV+RS) but needs that headroom at long context
       #- DRAFT_MAX=4
-      - LLAMA_ARG_N_CPU_MOE=12        # offload experts of first 24 layers; tune until VRAM fits the CTX you want
+      # - LLAMA_ARG_N_CPU_MOE=12 # offload experts of first 24 layers; tune until VRAM fits the CTX you want
       - LLAMA_ARG_MLOCK=1
-      - LLAMA_ARG_THREADS=12
+      - LLAMA_ARG_THREADS=4
+      - LLAMA_ARG_THREADS_HTTP=4
       - LLAMA_ARG_MMPROJ=/root/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-MTP-GGUF/snapshots/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/mmproj-BF16.gguf
-      - LLAMA_ARG_MMPROJ_OFFLOAD=0  # uncomment to keep vision tower on CPU (~1 GiB VRAM saved)
-      - PARALLEL=2
+      - LLAMA_ARG_MMPROJ_OFFLOAD=0 # 0 = vision tower on CPU; 1 needs ~861 MiB VRAM (won't fit on 4090 with full model)
+      - PARALLEL=1
       - KV_UNIFIED=1
+      - LLAMA_ARG_CACHE_RAM=10240
+      - SLOT_SAVE_PATH=/root/.cache/llama.cpp/kv # persisted KV caches (rw mount); enables /slots?action=save|restore
+      - LLAMA_ARG_UBATCH=512
       - LLAMA_ARG_THINK_BUDGET=512
       - LLAMA_ARG_THINK_BUDGET_MESSAGE=Wrap up.
-    entrypoint: ["/bin/bash", "/workspace/scripts/run-qwen36-35ba3b-nextn-server.sh"]
+    entrypoint: [ "/bin/bash", "/workspace/scripts/run-qwen36-35ba3b-nextn-server.sh" ]
+    cpuset: "0-7"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
+        limits:
+          cpus: 8
+          memory: 16G

@@ -1,0 +1,45 @@
+services:
+  llama-server:
+    restart: unless-stopped
+    build: .
+    ports:
+      - "8881:8080"
+    volumes:
+      - .:/workspace:ro # Mounts the workspace to access scripts and models
+      - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
+      - /mnt/S/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - LLAMA_SERVER=/usr/local/bin/llama-server
+      - VERIFY_ASSISTANT_GGUF=0 # Disables python validation script in container
+      - HF_REPO=unsloth/gemma-4-12b-it-GGUF:UD-Q8_K_XL
+      # Note: HF_DRAFT_REPO with a full .gguf filename trips llama-server's
+      # find_best_model regex (it builds "<tag>[.-]" which never matches a
+      # filename that IS the full tag). The script detects this and falls
+      # back to DRAFT_GGUF for the draft. Set DRAFT_GGUF to the actual
+      # cached snapshot path; refresh the hash if the upstream is re-uploaded.
+      - HF_DRAFT_REPO=Janvitos/gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF:gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf
+      - DRAFT_GGUF=/root/.cache/huggingface/hub/models--Janvitos--gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF/snapshots/f5fdc2cdfa1a1257cf6d979fb17f1c94f9852ec4/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf
+      - HOST=0.0.0.0
+      - PORT=8080
+      # You can easily override script defaults here:
+      - CTX=262144
+      # - NGL=99
+      # - SPEC=mtp
+      - LLAMA_ARG_CACHE_RAM=10240
+      - SLOT_SAVE_PATH=/root/.cache/llama.cpp/kv # persisted KV caches (rw mount); enables /slots?action=save|restore
+      - PARALLEL=1
+      - KV_UNIFIED=0
+      - LLAMA_ARG_THREADS=4
+      - LLAMA_ARG_THREADS_HTTP=4
+    entrypoint: [ "/bin/bash", "/workspace/scripts/run-gemma4-mtp-server.sh" ]
+    cpuset: "0-7"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+        limits:
+          cpus: 8
+          memory: 16G

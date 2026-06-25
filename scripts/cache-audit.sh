@@ -15,10 +15,13 @@
 # are mounted — paths match docker-compose.gemma31b.yml.
 #
 # Usage:
-#   scripts/cache-audit.sh                # audit default caches
-#   scripts/cache-audit.sh --hf /path/to/hf --llama /path/to/llama.cpp
-#   scripts/cache-audit.sh --no-remote    # skip huggingface.co checks
-#   scripts/cache-audit.sh --json         # machine-readable output
+#   scripts/cache-audit.sh                       # audit default caches
+#   scripts/cache-audit.sh --hf /p --llama /p    # override cache paths
+#   scripts/cache-audit.sh --no-remote           # skip huggingface.co checks
+#   scripts/cache-audit.sh --json                # machine-readable output
+#   scripts/cache-audit.sh --prune-partial       # delete *.incomplete/*.lock
+#   scripts/cache-audit.sh --prune               # delete old snapshots
+#   scripts/cache-audit.sh --prune --prune-partial --yes   # unattended
 #
 set -uo pipefail
 
@@ -28,21 +31,36 @@ LLAMA_CACHE="${LLAMA_CACHE:-/root/.cache/llama.cpp}"
 REMOTE=1
 JSON=0
 VERBOSE=0
+PRUNE=0
+PRUNE_PARTIAL=0
+YES=0
 
 # --- args ---------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --hf)        HF_CACHE="$2"; shift 2 ;;
-    --llama)     LLAMA_CACHE="$2"; shift 2 ;;
-    --no-remote) REMOTE=0; shift ;;
-    --json)      JSON=1; shift ;;
-    -v|--verbose) VERBOSE=1; shift ;;
+    --hf)            HF_CACHE="$2"; shift 2 ;;
+    --llama)         LLAMA_CACHE="$2"; shift 2 ;;
+    --no-remote)     REMOTE=0; shift ;;
+    --json)          JSON=1; shift ;;
+    --prune)         PRUNE=1; shift ;;
+    --prune-partial) PRUNE_PARTIAL=1; shift ;;
+    -y|--yes)        YES=1; shift ;;
+    -v|--verbose)    VERBOSE=1; shift ;;
     -h|--help)
       sed -n '2,30p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Helper used by --prune: prompt for confirmation unless --yes.
+confirm() {
+  local prompt=$1
+  if [[ $YES -eq 1 ]]; then return 0; fi
+  local ans
+  read -r -p "$prompt [y/N] " ans </dev/tty
+  [[ $ans =~ ^[Yy]([Ee][Ss])?$ ]]
+}
 
 # --- helpers ------------------------------------------------------------------
 hr() { printf '%s\n' "------------------------------------------------------------"; }
@@ -255,7 +273,67 @@ if [[ $JSON -eq 1 ]]; then
 fi
 
 hr
-echo "Tip: clean partial downloads with:"
-echo "  find $HF_CACHE/hub -name '*.incomplete' -delete"
-echo "Tip: prune old snapshots with:"
-echo "  hf cache delete --revision <OLD_REV> <repo>"
+# --- prune actions ------------------------------------------------------------
+if [[ $PRUNE_PARTIAL -eq 1 && $HF_HAS -eq 1 ]]; then
+  hr
+  echo "Pruning partial downloads (*.incomplete, *.lock)..."
+  freed=0
+  while IFS= read -r -d '' f; do
+    sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0)
+    freed=$(( freed + sz ))
+    if confirm "  delete $(basename "$(dirname "$f")")/$(basename "$f") ($(bytes "$sz"))?"; then
+      rm -f -- "$f"
+    fi
+  done < <(find "$HF_CACHE/hub" -type f \( -name '*.incomplete' -o -name '*.lock' \) -print0 2>/dev/null)
+  echo "Freed ~$(bytes "$freed") of partial data."
+fi
+
+if [[ $PRUNE -eq 1 && $HF_HAS -eq 1 ]]; then
+  hr
+  echo "Pruning older snapshots (keeps the newest revision per repo)..."
+  freed=0
+  for repo_dir in "$HF_CACHE"/hub/models--*; do
+    [[ -d $repo_dir/snapshots ]] || continue
+    revs=( "$repo_dir"/snapshots/*/ )
+    [[ ${#revs[@]} -le 1 ]] && continue
+    sorted=( $(ls -1dt "${revs[@]}" 2>/dev/null) )
+    keep=${sorted[0]}
+    for r in "${sorted[@]:1}"; do
+      rev=$(basename "$r")
+      sz=$(du -sb "$r" 2>/dev/null | awk '{print $1}')
+      freed=$(( freed + sz ))
+      if confirm "  delete $rev ($(bytes "$sz")) under $(basename "$repo_dir")?"; then
+        # Remove the snapshot directory and its symlinks; blobs are shared
+        # via refcount so they stay as long as the surviving snapshot uses
+        # them. Truly orphaned blobs would need a follow-up `find ... -links 1`
+        # pass — left to the operator.
+        rm -rf -- "$r"
+      fi
+    done
+  done
+  echo "Freed ~$(bytes "$freed") of snapshot references."
+  echo "Note: blobs are content-addressed; truly orphaned blobs can be removed with:"
+  echo "  find $HF_CACHE/hub -type f ! -links 1 -path '*/blobs/*' -prune -o \\"
+  echo "         -type l -path '*/snapshots/*' -prune -o \\"
+  echo "         -type f -path '*/blobs/*' -print | while read -r f; do"
+  echo "    [ \$(stat -c %h \"\$f\") -le 1 ] && rm -f -- \"\$f\""
+  echo "  done"
+fi
+
+if [[ $JSON -eq 0 ]]; then
+  hr
+  echo "Cleanup commands (pure bash — no 'hf' CLI required):"
+  echo "  # delete all partial downloads:"
+  echo "  find $HF_CACHE/hub -type f \\( -name '*.incomplete' -o -name '*.lock' \\) -delete"
+  echo
+  echo "  # delete a specific snapshot revision (example: abc1234):"
+  echo "  rm -rf $HF_CACHE/hub/models--<owner>--<name>/snapshots/<OLD_REV>"
+  echo
+  echo "  # remove blob files no longer referenced by any snapshot:"
+  echo "  find $HF_CACHE/hub/models--* -type f -path '*/blobs/*' ! -links 1 -delete"
+  echo
+  echo "Or let this script do it:"
+  echo "  $0 --prune-partial"
+  echo "  $0 --prune                 # keeps newest snapshot per repo"
+  echo "  $0 --prune --prune-partial --yes    # unattended"
+fi

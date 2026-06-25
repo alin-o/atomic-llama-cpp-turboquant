@@ -21,7 +21,9 @@
 #   scripts/cache-audit.sh --json                # machine-readable output
 #   scripts/cache-audit.sh --prune-partial       # delete *.incomplete/*.lock
 #   scripts/cache-audit.sh --prune               # delete old snapshots
-#   scripts/cache-audit.sh --prune --prune-partial --yes   # unattended
+#   scripts/cache-audit.sh --remove-empty        # delete every repo with 0 GGUFs
+#   scripts/cache-audit.sh --remove owner/name   # delete a specific repo (repeatable)
+#   scripts/cache-audit.sh --prune --prune-partial --remove-empty --yes   # unattended
 #
 set -uo pipefail
 
@@ -33,7 +35,9 @@ JSON=0
 VERBOSE=0
 PRUNE=0
 PRUNE_PARTIAL=0
+REMOVE_EMPTY=0
 YES=0
+declare -a REMOVE_REPOS=()
 
 # --- args ---------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -44,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --json)          JSON=1; shift ;;
     --prune)         PRUNE=1; shift ;;
     --prune-partial) PRUNE_PARTIAL=1; shift ;;
+    --remove-empty)  REMOVE_EMPTY=1; shift ;;
+    --remove)        REMOVE_REPOS+=("$2"); shift 2 ;;
     -y|--yes)        YES=1; shift ;;
     -v|--verbose)    VERBOSE=1; shift ;;
     -h|--help)
@@ -108,7 +114,7 @@ fi
 
 if [[ $HF_HAS -eq 1 ]]; then
   hr
-  printf '%-12s  %-50s  %-10s  %-19s\n' "STATUS" "REPO" "GGUFs" "BLOB SIZE"
+  printf '%-12s  %-60s  %-10s  %-19s\n' "STATUS" "REPO" "GGUFs" "BLOB SIZE"
   hr
 fi
 
@@ -154,8 +160,8 @@ for repo_dir in "$HF_CACHE"/hub/models--*; do
   if [[ $JSON -eq 1 ]]; then
     JSON_REPOS+=("{\"repo\":\"$(json_escape "$repo")\",\"ggufs\":$gguf_count,\"bytes\":$total_gguf_bytes,\"status\":\"$status\",\"partial_files\":${#partial_files[@]}}")
   else
-    printf '%-12s  %-50s  %-10s  %s\n' \
-      "$status" "${repo:0:50}" "$gguf_count" "$(bytes "$total_gguf_bytes")"
+    printf '%-12s  %-60s  %-10s  %s\n' \
+      "$status" "${repo:0:60}" "$gguf_count" "$(bytes "$total_gguf_bytes")"
   fi
 
   if [[ ${#partial_files[@]} -gt 0 ]]; then
@@ -273,6 +279,87 @@ if [[ $JSON -eq 1 ]]; then
 fi
 
 hr
+# --- remove specific repos ----------------------------------------------------
+# Usage: --remove owner/name   (repeatable)
+#         --remove-empty       (every repo that has 0 GGUFs and no partials)
+# Converts "owner/name" to the on-disk directory "models--owner--name",
+# shows what's about to be deleted, prompts unless --yes, then rm -rf's it.
+remove_repo() {
+  local spec=$1
+  local dir_name="models--${spec//\//--}"
+  local repo_dir="$HF_CACHE/hub/$dir_name"
+
+  # Prefix-tolerant lookup: if the literal name isn't on disk, look for any
+  # models--<owner>--<name>* directory whose suffix matches what the user
+  # typed (handles terminals that truncate the display of long repo names).
+  if [[ ! -d $repo_dir ]]; then
+    local owner=${spec%%/*} name=${spec#*/}
+    if [[ -n $owner && -n $name && $owner != $spec ]]; then
+      local matches=( "$HF_CACHE"/hub/models--${owner}--${name}* )
+      # filter to actual directories only (glob may pass literal if no match)
+      local real_matches=()
+      for m in "${matches[@]}"; do
+        [[ -d $m ]] && real_matches+=("$m")
+      done
+      if [[ ${#real_matches[@]} -eq 1 ]]; then
+        repo_dir=${real_matches[0]}
+        dir_name=$(basename "$repo_dir")
+        echo "  (matched by prefix → $dir_name)"
+      elif [[ ${#real_matches[@]} -gt 1 ]]; then
+        echo "  [skip] $spec — ambiguous prefix, ${#real_matches[@]} candidates:" >&2
+        printf '    %s\n' "${real_matches[@]}" >&2
+        return 1
+      fi
+    fi
+    if [[ ! -d $repo_dir ]]; then
+      echo "  [skip] $spec — not present at $repo_dir" >&2
+      echo "         (cached repos start with: $HF_CACHE/hub/models--<owner>--<name>)" >&2
+      return 1
+    fi
+  fi
+
+  # summary
+  local size; size=$(du -sb "$repo_dir" 2>/dev/null | awk '{print $1}')
+  local ggufs; ggufs=$(find "$repo_dir/snapshots" -type l -name '*.gguf' 2>/dev/null | wc -l)
+  local revs; revs=$(find "$repo_dir/snapshots" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+                     | xargs -n1 basename 2>/dev/null | tr '\n' ' ')
+
+  echo "About to remove: $spec"
+  echo "  path    : $repo_dir"
+  echo "  size    : $(bytes "$size")"
+  echo "  ggufs   : $ggufs"
+  [[ -n $revs ]] && echo "  revs    : $revs"
+
+  if ! confirm "  confirm deletion?"; then
+    echo "  [kept] $spec"
+    return 0
+  fi
+
+  rm -rf -- "$repo_dir"
+  echo "  [removed] $spec (freed ~$(bytes "$size"))"
+}
+
+if [[ $REMOVE_EMPTY -eq 1 && $HF_HAS -eq 1 ]]; then
+  hr
+  echo "Removing empty repos (no GGUFs, no partial downloads)..."
+  for repo_dir in "$HF_CACHE"/hub/models--*; do
+    [[ -d $repo_dir ]] || continue
+    ggufs=$(find "$repo_dir/snapshots" -type l -name '*.gguf' 2>/dev/null | wc -l)
+    partial=$(find "$repo_dir/blobs" -type f \( -name '*.incomplete' -o -name '*.lock' \) 2>/dev/null | wc -l)
+    if [[ $ggufs -eq 0 && $partial -eq 0 ]]; then
+      dir=$(basename "$repo_dir"); spec="${dir#models--}"; spec="${spec//--//}"
+      remove_repo "$spec"
+    fi
+  done
+fi
+
+for spec in "${REMOVE_REPOS[@]:-}"; do
+  [[ -z $spec ]] && continue
+  hr
+  remove_repo "$spec"
+done
+
+hr
 # --- prune actions ------------------------------------------------------------
 if [[ $PRUNE_PARTIAL -eq 1 && $HF_HAS -eq 1 ]]; then
   hr
@@ -334,6 +421,8 @@ if [[ $JSON -eq 0 ]]; then
   echo
   echo "Or let this script do it:"
   echo "  $0 --prune-partial"
-  echo "  $0 --prune                 # keeps newest snapshot per repo"
-  echo "  $0 --prune --prune-partial --yes    # unattended"
+echo "  $0 --prune                       # keeps newest snapshot per repo"
+echo "  $0 --remove-empty                # drops every repo with 0 GGUFs"
+echo "  $0 --remove owner/name           # drops a specific repo (repeatable)"
+echo "  $0 --remove-empty --prune --prune-partial --yes    # unattended"
 fi

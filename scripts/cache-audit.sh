@@ -19,6 +19,7 @@
 #   scripts/cache-audit.sh --hf /p --llama /p    # override cache paths
 #   scripts/cache-audit.sh --no-remote           # skip huggingface.co checks
 #   scripts/cache-audit.sh --json                # machine-readable output
+#   scripts/cache-audit.sh --wide                # don't truncate REPO column
 #   scripts/cache-audit.sh --prune-partial       # delete *.incomplete/*.lock
 #   scripts/cache-audit.sh --prune               # delete old snapshots
 #   scripts/cache-audit.sh --remove-empty        # delete every repo with 0 GGUFs
@@ -37,6 +38,7 @@ PRUNE=0
 PRUNE_PARTIAL=0
 REMOVE_EMPTY=0
 YES=0
+WIDE=0
 declare -a REMOVE_REPOS=()
 
 # --- args ---------------------------------------------------------------------
@@ -50,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --prune-partial) PRUNE_PARTIAL=1; shift ;;
     --remove-empty)  REMOVE_EMPTY=1; shift ;;
     --remove)        REMOVE_REPOS+=("$2"); shift 2 ;;
+    --wide)          WIDE=1; shift ;;
     -y|--yes)        YES=1; shift ;;
     -v|--verbose)    VERBOSE=1; shift ;;
     -h|--help)
@@ -113,8 +116,21 @@ else
 fi
 
 if [[ $HF_HAS -eq 1 ]]; then
+  # Pick a REPO column width that fits every cached name (min 30, max 100).
+  # --wide disables the fixed width entirely so the full name is always shown.
+  REPO_W=30
+  if [[ $WIDE -eq 0 ]]; then
+    while IFS= read -r d; do
+      [[ -z $d ]] && continue
+      # d is "models--<owner>--<name>"; reconstruct "<owner>/<name>"
+      n=${d#models--}; n=${n//--//}
+      REPO_W=$(( REPO_W > ${#n} ? REPO_W : ${#n} ))
+    done < <(find "$HF_CACHE/hub" -mindepth 1 -maxdepth 1 -type d -name 'models--*' 2>/dev/null)
+    (( REPO_W > 100 )) && REPO_W=100
+    (( REPO_W < 30 ))  && REPO_W=30
+  fi
   hr
-  printf '%-12s  %-60s  %-10s  %-19s\n' "STATUS" "REPO" "GGUFs" "BLOB SIZE"
+  printf '%-12s  %-'"$REPO_W"'s  %-10s  %-19s\n' "STATUS" "REPO" "GGUFs" "BLOB SIZE"
   hr
 fi
 
@@ -160,8 +176,13 @@ for repo_dir in "$HF_CACHE"/hub/models--*; do
   if [[ $JSON -eq 1 ]]; then
     JSON_REPOS+=("{\"repo\":\"$(json_escape "$repo")\",\"ggufs\":$gguf_count,\"bytes\":$total_gguf_bytes,\"status\":\"$status\",\"partial_files\":${#partial_files[@]}}")
   else
-    printf '%-12s  %-60s  %-10s  %s\n' \
-      "$status" "${repo:0:60}" "$gguf_count" "$(bytes "$total_gguf_bytes")"
+    if [[ $WIDE -eq 1 ]]; then
+      printf '%-12s  %s  %-10s  %s\n' \
+        "$status" "$repo" "$gguf_count" "$(bytes "$total_gguf_bytes")"
+    else
+      printf '%-12s  %-'"$REPO_W"'s  %-10s  %s\n' \
+        "$status" "$repo" "$gguf_count" "$(bytes "$total_gguf_bytes")"
+    fi
   fi
 
   if [[ ${#partial_files[@]} -gt 0 ]]; then
@@ -419,8 +440,7 @@ if [[ $JSON -eq 0 ]]; then
   echo "  # remove blob files no longer referenced by any snapshot:"
   echo "  find $HF_CACHE/hub/models--* -type f -path '*/blobs/*' ! -links 1 -delete"
   echo
-  echo "Or let this script do it:"
-  echo "  $0 --prune-partial"
+  echo "Or let this script do it:"echo "  $0 --wide                        # show full repo names (no truncation)"  echo "  $0 --prune-partial"
 echo "  $0 --prune                       # keeps newest snapshot per repo"
 echo "  $0 --remove-empty                # drops every repo with 0 GGUFs"
 echo "  $0 --remove owner/name           # drops a specific repo (repeatable)"

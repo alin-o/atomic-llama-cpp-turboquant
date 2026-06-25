@@ -1,0 +1,55 @@
+# yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF (Q4_K_M, dense, no MTP).
+#
+# 12B coding fine-tune from yuxinlu1 — text only, no vision tower, no MTP head.
+# SPEC=off disables speculative decoding (this model doesn't have an MTP draft).
+# To switch quants: change the substring after the colon, e.g. :Q6_K, :Q8_0.
+# To switch to a different model entirely: change both the owner/repo and the tag.
+#
+# Files in the yuxinlu1 repo (from /api/models):
+#   gemma4-coding-Q2_K.gguf
+#   gemma4-coding-Q3_K_M.gguf
+#   gemma4-coding-Q4_K_M.gguf
+#   gemma4-coding-Q6_K.gguf
+#   gemma4-coding-Q8_0.gguf
+
+services:
+  llama-server:
+    restart: unless-stopped
+    build: .
+    ports:
+      - "8881:8080"
+    volumes:
+      - .:/workspace:ro
+      - /mnt/S/.cache/llama.cpp:/root/.cache/llama.cpp
+      - /mnt/S/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - LLAMA_SERVER=/usr/local/bin/llama-server
+      # No MTP, no mmproj, no draft. The unified run-gemma4-mtp-server.sh
+      # handles this: with HF_DRAFT_REPO empty and SPEC=off, it skips the
+      # draft block entirely and just runs the model standalone.
+      - HF_REPO=yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M
+      - HOST=0.0.0.0
+      - PORT=8080
+      # Tuning
+      - CTX=16384              # 16K is safe; the model supports up to 262K
+      - NGL=99
+      - SPEC=off               # no MTP head on this model
+      - KV_UNIFIED=1           # single-slot fine-tune; unified KV is fine
+      - PARALLEL=1
+      # Server features
+      - LLAMA_ARG_THREADS=4
+      - LLAMA_ARG_THREADS_HTTP=4
+      - LLAMA_ARG_CACHE_RAM=10240
+      - SLOT_SAVE_PATH=/root/.cache/llama.cpp/kv
+    entrypoint: [ "/bin/bash", "/workspace/scripts/run-gemma4-mtp-server.sh" ]
+    cpuset: "0-7"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+        limits:
+          cpus: 8
+          memory: 16G

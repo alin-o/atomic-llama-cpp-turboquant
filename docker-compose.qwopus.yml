@@ -11,13 +11,20 @@ services:
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_NEXTN_GGUF=0 # Disables python validation script in container
-      - MAIN_GGUF=/root/.cache/huggingface/hub/models--Jackrong--Qwopus3.6-27B-v2-GGUF/snapshots/f79e3a873876d511e96768cf713105b4e7f81eab/Qwopus3.6-27B-v2-Q4_K_M.gguf
+      # Set HF_REPO=owner/repo:tag and the server downloads + resumes via its
+      # built-in -hf (common/download.cpp). No snapshot hash pinning needed;
+      # llama-server handles ETag validation and HTTP Range resume automatically.
+      # To use a pre-staged file instead, set MAIN_GGUF=/path/to/file.gguf
+      # (and leave HF_REPO empty).
+      - HF_REPO=Jackrong/Qwopus3.6-27B-Coder-Compat-MTP-GGUF:Q5_K_M
+      - HF_DRAFT_REPO=Jackrong/Qwopus3.6-27B-Coder-Compat-MTP-GGUF:Q5_K_M  # shared-model NextN
       - HOST=0.0.0.0
       - PORT=8080
       # You can override script defaults here if needed:
-      - CTX=200000
+      - CTX=128000
       # - NGL=99
       - SPEC=nextn
+      - DRAFT_MAX=4
       - PARALLEL=1
       - KV_UNIFIED=1
       - LLAMA_ARG_CACHE_RAM=10240
@@ -40,4 +47,4 @@ services:
               capabilities: [ gpu ]
         limits:
           cpus: 8
-          memory: 16G
+          memory: 24G

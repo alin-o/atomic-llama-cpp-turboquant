@@ -11,7 +11,13 @@ services:
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_ASSISTANT_GGUF=0 # Disables python validation script in container
-      - MAIN_GGUF=/root/.cache/huggingface/hub/models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/4006d4d95819e0a4975eae220762f1552dc2f699/gemma-4-26B-A4B-it-Q4_K_M.gguf
+      # Set HF_REPO / HF_DRAFT_REPO and the server downloads + resumes via its
+      # built-in -hf / -hfd (common/download.cpp). No snapshot hash pinning
+      # needed; llama-server handles ETag validation and HTTP Range resume.
+      - HF_REPO=ggml-org/gemma-4-26B-A4B-it-GGUF:Q4_K_M
+      - HF_DRAFT_REPO=AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF:gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf
+      # llama-server's find_best_model regex fails on full-filename tags,
+      # so the script falls back to DRAFT_GGUF when the cached file exists.
       - DRAFT_GGUF=/root/.cache/huggingface/hub/models--AtomicChat--gemma-4-26B-A4B-it-assistant-GGUF/snapshots/171ecca181ec00ed6ffacb573195aa7c644bbdc6/gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf
       - HOST=0.0.0.0
       - PORT=8080

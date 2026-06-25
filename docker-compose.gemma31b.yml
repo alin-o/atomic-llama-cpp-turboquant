@@ -19,7 +19,10 @@ services:
     environment:
       - LLAMA_SERVER=/usr/local/bin/llama-server
       - VERIFY_ASSISTANT_GGUF=0 # Disables python validation script in container
-      - MAIN_GGUF=/root/.cache/huggingface/hub/models--ggml-org--gemma-4-31B-it-GGUF/snapshots/fb5801c702a472691c6eba168f28af79a076fbe9/gemma-4-31B-it-Q4_K_M.gguf
+      - HF_REPO=ggml-org/gemma-4-31B-it-GGUF:Q4_K_M
+      - HF_DRAFT_REPO=AtomicChat/gemma-4-31B-it-assistant-GGUF:gemma-4-31B-it-assistant.Q4_K_M.gguf
+      # llama-server's find_best_model regex fails on full-filename tags,
+      # so the script falls back to DRAFT_GGUF when the cached file exists.
       - DRAFT_GGUF=/root/.cache/huggingface/hub/models--AtomicChat--gemma-4-31B-it-assistant-GGUF/snapshots/c2357e3ea670ef03c5f1a984e7fc37cdb5dc45c4/gemma-4-31B-it-assistant.Q4_K_M.gguf
       - HOST=0.0.0.0
       - PORT=8080
@@ -34,7 +37,7 @@ services:
       - SLOT_SAVE_PATH=/root/.cache/llama.cpp/kv # persisted KV caches (rw mount); enables /slots?action=save|restore
       - LLAMA_ARG_THREADS=4
       - LLAMA_ARG_THREADS_HTTP=4
-    entrypoint: [ "/bin/bash", "/workspace/scripts/run-gemma4-31b-mtp-server.sh" ]
+    entrypoint: [ "/bin/bash", "/workspace/scripts/run-gemma4-mtp-server.sh" ]
     cpuset: "0-7"
     deploy:
       resources:

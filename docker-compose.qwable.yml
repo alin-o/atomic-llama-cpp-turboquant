@@ -56,7 +56,7 @@ services:
       # successful download, find the actual snapshot dir hash with:
       #   ls /mnt/S/.cache/huggingface/hub/models--huihui-ai--Huihui-Qwable-3.6-27b-abliterated-MTP-GGUF/snapshots/
       # and replace <SNAPSHOT_HASH> below. The file inside is mmproj-model-f16.gguf.
-      - LLAMA_ARG_MMPROJ=/root/.cache/huggingface/hub/models--huihui-ai--Huihui-Qwable-3.6-27b-abliterated-MTP-GGUF/snapshots/<SNAPSHOT_HASH>/mmproj-model-f16.gguf
+      - LLAMA_ARG_MMPROJ=/root/.cache/huggingface/hub/models--huihui-ai--Huihui-Qwable-3.6-27b-abliterated-MTP-GGUF/snapshots/c40abf22a0093495ab658519ccc69962cd66da72/mmproj-model-f16.gguf
     entrypoint: [ "/bin/bash", "/workspace/scripts/run-qwen36-27b-nextn-server.sh" ]
     cpuset: "0-7"
     deploy:
